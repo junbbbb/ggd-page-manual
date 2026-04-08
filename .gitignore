@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local configs with credentials
+*.config.local.js
+.env
+.env.local
+
+# Temp output
+tmp/
+temp/
