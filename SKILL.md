@@ -48,14 +48,54 @@ Takes logged-in screenshots of web pages, injects numbered circle labels at prec
    - Pages array with selectors + anchors
    - Output directory
 
-5. **Run capture**:
+5. **Validate selectors first (for 10+ pages)**:
+   ```bash
+   node ~/.claude/skills/page-manual/capture.js <project>/docs/page-manual-config.js --validate
+   ```
+   Reads `_failures.json` to find broken selectors. Fix them before full capture.
+
+6. **Run capture**:
    ```bash
    node ~/.claude/skills/page-manual/capture.js <project>/docs/page-manual-config.js
    ```
 
-6. **Generate markdown** — one `.md` file per page with number-keyed descriptions.
+7. **Retry failed pages only** (if needed):
+   ```bash
+   node capture.js config.js --only pageName1,pageName2
+   ```
 
-7. **Report result** — list generated files, suggest next steps (PPT generation, Cowork handoff).
+8. **Generate markdown** — one `NN_name.md` file per page (prefix matches image).
+
+9. **Report result** — list generated files, summarize `_failures.json`, suggest Cowork handoff.
+
+## CLI flags
+
+| Flag | Purpose |
+|---|---|
+| `--validate` | Dry-run: check all selectors without saving screenshots |
+| `--only name1,name2` | Only process specific page(s) by name (comma-separated) |
+| `--skip-raw` | Skip saving raw (unlabeled) screenshots |
+| `--headless` | Force headless mode |
+
+## Scaling to 50+ pages
+
+For large page sets, use **subagent parallelization** for analysis:
+
+1. **Build pattern library once** — analyze 3-5 representative pages manually, derive selector patterns (search, grid, buttons, headers). Document in a `pattern-library.md`.
+
+2. **Spawn parallel subagents** for JSP analysis:
+   - Split pages into batches of 15-25
+   - Each `Explore` subagent receives: URL list + pattern library + JSP structure hints
+   - Returns structured JSON per page with: `url`, `name`, `selectors[]`, `koreanTitle`, `sectionSummaries[]`
+   - Run all batches in parallel (one message, multiple Agent tool calls)
+
+3. **Aggregate** into single config file.
+
+4. **Validate** with `--validate` → fix failures → run full capture.
+
+5. **Spawn parallel subagents again** for markdown generation (one per batch).
+
+6. **Review** by sampling random labeled images, patch specific pages with `--only`.
 
 ## Label anchor options
 
@@ -149,18 +189,44 @@ module.exports = {
 ## Output
 
 For each page, `capture.js` writes:
-- `<outputDir>/labeled_<name>.png` — with red circle labels
-- `<outputDir>/<name>.png` — raw screenshot (no labels)
+- `<outputDir>/NN_<name>.png` — labeled image with red circle markers (NN = 1-based order from `pages` array, zero-padded)
+- `<outputDir>/raw/<name>.png` — raw screenshot (no labels), in subfolder
+- `<outputDir>/_failures.json` — summary of selector failures per page (always written)
 
-Claude additionally writes:
-- `<outputDir>/<name>.md` — markdown with per-number descriptions
+Claude MUST additionally write (matching the same order prefix):
+- `<outputDir>/NN_<name>.md` — markdown description with per-number explanations
+
+**Important**: The `NN_` prefix follows the order of the `pages` array in the config. Slide 1 = `01_`, slide 2 = `02_`, etc. This lets Cowork process files in alphabetical order and get the correct slide sequence automatically.
+
+### `_failures.json` schema
+
+```json
+{
+  "timestamp": "...",
+  "mode": "capture|validate",
+  "total": 100,
+  "pagesWithFailures": 7,
+  "totalLabelFailures": 12,
+  "failures": {
+    "somePageName": [
+      { "n": 3, "selector": "a[name='a_reg']", "reason": "hidden" }
+    ]
+  }
+}
+```
+
+Reasons: `not_found`, `hidden`, `selector_error: ...`, `page_error: ...`.
 
 ## Hand-off to Cowork/PPT
 
-The labeled PNG + MD files are designed to be dropped into Claude Cowork:
+The numbered files in `<outputDir>` are designed for one-shot Cowork prompting:
 
 ```
-<outputDir>에 있는 labeled_*.png 이미지와 *.md 설명으로
-슬라이드 하나씩 만들어서 PPT 생성해줘.
-좌측에 이미지, 우측에 번호별 설명. 흰 배경.
+<outputDir>에 있는 파일을 알파벳 순서대로 슬라이드로 만들어줘.
+01_xxx.png + 01_xxx.md → 1번 슬라이드
+02_yyy.png + 02_yyy.md → 2번 슬라이드
+...
+각 슬라이드: 좌측 이미지, 우측 md의 번호별 설명. 흰 배경. 깔끔하게.
 ```
+
+Raw screenshots in `raw/` subfolder are reference/reuse only — Cowork ignores them.

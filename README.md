@@ -9,11 +9,22 @@ Given a list of URLs, it:
 1. Logs into your admin app automatically
 2. Navigates to each page and takes a clipped screenshot of the main content area
 3. Injects numbered red circle labels at precise DOM positions (using CSS selectors, not pixel guessing)
-4. Saves two versions per page:
-   - `labeled_<name>.png` — with numbered markers (for manuals)
-   - `raw/<name>.png` — clean screenshot (for reuse)
+4. Saves files with **order-prefixed names** so alphabetical sort = slide order:
+   ```
+   docs/
+   ├── 01_openCatePage.png     ← labeled image (slide 1)
+   ├── 01_openCatePage.md      ← description (paired)
+   ├── 02_openDtPage.png
+   ├── 02_openDtPage.md
+   └── raw/
+       ├── openCatePage.png    ← unlabeled original (reuse)
+       └── openDtPage.png
+   ```
 
-The labeled PNGs and per-page markdown descriptions can be handed to Claude Cowork / PowerPoint to assemble the final slides.
+Hand the folder to Claude Cowork with a one-liner:
+
+> Process files in alphabetical order. Each `NN_xxx.png` + `NN_xxx.md` pair = one slide.
+> Left: image. Right: markdown's numbered descriptions. White background.
 
 ## Installation (as Claude Code skill)
 
