@@ -156,6 +156,56 @@ For large page sets, use **subagent parallelization** for analysis:
 
 10. **Auto-login check** — when navigating, if the URL doesn't include the target page path after redirect, the page needs login. capture.js auto-logs in via credentials from config.
 
+## Waiting for slow-loading pages
+
+Many admin pages fetch grid data via AJAX after `DOMContentLoaded`. The default `waitMs` (4s) isn't enough for grids that take 10-60 seconds to populate. Use `waitFor` per page (declarative, JSON-safe):
+
+```javascript
+{
+  url: '...',
+  labels: [...],
+  waitFor: {
+    selector: '#dtfile-sheet-section td',  // wait until grid has a <td>
+    text: '조회된 데이터가 없습니다',          // OR wait for "no results" text
+    hidden: '.loading-spinner',             // wait until spinner disappears
+    networkIdle: true,                      // wait for network to go quiet
+    js: 'typeof mySheet !== "undefined" && mySheet.RowCount() >= 0',  // custom JS
+    extraDelay: 500,                        // extra buffer after conditions pass
+    timeout: 90000,                         // max wait (default 90s)
+  }
+}
+```
+
+All conditions are awaited in order; any that trigger `waitFor timeout` is logged as `[WARN] waitFor timeout: ...` but capture continues (so a partial screenshot is still saved).
+
+**Picking the right condition:**
+
+| Scenario | Best option |
+|---|---|
+| IBSheet grid with AJAX data | `selector: '<grid-id> td'` (first data cell) |
+| Grid that may legitimately return 0 rows | Use `js` with IBSheet API, e.g. `'mySheet.IsBusy() === false'` |
+| Page with loading overlay | `hidden: '.loading, .sheet-loading'` |
+| Multiple async fetches on one page | `networkIdle: true` + `extraDelay: 500` |
+| Data appears after running a search button click | Use `beforeCapture` to click, then combine with `waitFor` |
+
+**Slow-loading page template** (for pages that take 30-60s):
+
+```javascript
+{
+  order: 42, name: 'heavyReportPage',
+  url: 'http://host/dream/report/heavyPage.do',
+  waitMs: 2000,  // minimal initial wait
+  waitFor: {
+    selector: '#report-sheet td',   // wait for first data cell
+    timeout: 90000,                  // up to 90s
+    extraDelay: 1000,                // 1s buffer so chart renders too
+  },
+  labels: [ /* ... */ ],
+}
+```
+
+Don't bump `waitMs` to 60s globally — that multiplies total capture time by the number of pages. Use `waitFor` only on the pages that need it.
+
 ## Config file template
 
 See `template.config.js` in this skill directory.

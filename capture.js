@@ -104,30 +104,37 @@ async function resolveLabels(page, labels, containerSelector) {
   const failures = [];
 
   for (const lbl of labels) {
-    const failItem = { n: lbl.n, selector: lbl.selector, reason: null };
+    // Try primary selector, then fallbacks (lbl.fallback can be string or array)
+    const fallbacks = Array.isArray(lbl.fallback) ? lbl.fallback
+                    : (lbl.fallback ? [lbl.fallback] : []);
+    const candidates = [lbl.selector, ...fallbacks];
 
-    let loc;
-    try {
-      loc = page.locator(lbl.selector).first();
-      if ((await loc.count()) === 0) {
-        failItem.reason = 'not_found';
-        failures.push(failItem);
-        console.log(`  [FAIL] #${lbl.n} not_found: ${lbl.selector}`);
-        continue;
+    let box = null;
+    let usedSelector = null;
+    let lastReason = 'not_found';
+
+    for (const sel of candidates) {
+      try {
+        const loc2 = page.locator(sel).first();
+        if ((await loc2.count()) === 0) { lastReason = 'not_found'; continue; }
+        const b = await loc2.boundingBox();
+        if (!b) { lastReason = 'hidden'; continue; }
+        box = b;
+        usedSelector = sel;
+        break;
+      } catch (e) {
+        lastReason = `selector_error: ${e.message}`;
       }
-    } catch (e) {
-      failItem.reason = `selector_error: ${e.message}`;
-      failures.push(failItem);
-      console.log(`  [FAIL] #${lbl.n} selector_error: ${e.message}`);
-      continue;
     }
 
-    const box = await loc.boundingBox();
     if (!box) {
-      failItem.reason = 'hidden';
+      const failItem = { n: lbl.n, selector: lbl.selector, reason: lastReason };
       failures.push(failItem);
-      console.log(`  [FAIL] #${lbl.n} hidden: ${lbl.selector}`);
+      console.log(`  [FAIL] #${lbl.n} ${lastReason}: ${lbl.selector}`);
       continue;
+    }
+    if (usedSelector !== lbl.selector) {
+      console.log(`  [FB]   #${lbl.n} fallback used: ${usedSelector}`);
     }
 
     let { x, y } = computeLabelXY(box, lbl.anchor || 'left', lbl.dx, lbl.dy);
@@ -190,22 +197,91 @@ async function login(page, config) {
   console.log('Login complete!\n');
 }
 
+async function safeContainerScreenshot(page, container, fallbackPath) {
+  // Try element screenshot, fall back to fullPage if container box is unavailable
+  try {
+    if ((await container.count()) > 0) {
+      await container.screenshot({ path: fallbackPath, timeout: 10000 });
+      return 'container';
+    }
+  } catch (e) {
+    console.log(`  [WARN] container screenshot failed: ${e.message.split('\n')[0]}`);
+  }
+  await page.screenshot({ path: fallbackPath, fullPage: true });
+  return 'fullpage';
+}
+
 async function processPage(page, p, config, opts) {
   console.log(`[${p._order}/${config._total}] ${p.name}`);
-  await page.goto(p.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.waitForTimeout(p.waitMs || 4000);
+  const gotoTimeout = p.gotoTimeout || 30000;
+  const waitMs = p.waitMs || 4000;
+
+  try {
+    await page.goto(p.url, { waitUntil: 'domcontentloaded', timeout: gotoTimeout });
+  } catch (err) {
+    console.log(`  [WARN] goto failed/slow: ${err.message.split('\n')[0]}`);
+  }
+  await page.waitForTimeout(waitMs);
+
+  // Declarative wait conditions (good for AJAX-loaded tables/grids)
+  // Default timeout is 90s since some admin pages can take 60s+ to load data.
+  if (p.waitFor) {
+    const wf = p.waitFor;
+    const wfTimeout = wf.timeout || 90000;
+    try {
+      if (wf.networkIdle) {
+        await page.waitForLoadState('networkidle', { timeout: wfTimeout });
+      }
+      if (wf.selector) {
+        await page.waitForSelector(wf.selector, { state: 'visible', timeout: wfTimeout });
+      }
+      if (wf.hidden) {
+        // e.g. loading spinner — wait until it disappears
+        await page.waitForSelector(wf.hidden, { state: 'hidden', timeout: wfTimeout });
+      }
+      if (wf.text) {
+        const textStr = JSON.stringify(wf.text);
+        await page.waitForFunction(
+          `document.body && document.body.innerText.includes(${textStr})`,
+          { timeout: wfTimeout }
+        );
+      }
+      if (wf.js) {
+        // Arbitrary JS expression, e.g. "mySheet.RowCount() > 0"
+        await page.waitForFunction(wf.js, { timeout: wfTimeout });
+      }
+      if (wf.extraDelay) {
+        await page.waitForTimeout(wf.extraDelay);
+      }
+      console.log(`  [WAIT] waitFor OK`);
+    } catch (err) {
+      console.log(`  [WARN] waitFor timeout: ${err.message.split('\n')[0]}`);
+    }
+  }
 
   if (typeof p.beforeCapture === 'function') {
-    await p.beforeCapture(page);
+    try {
+      await p.beforeCapture(page);
+    } catch (err) {
+      console.log(`  [WARN] beforeCapture failed: ${err.message.split('\n')[0]}`);
+    }
   }
 
   const containerSel = config.containerSelector || 'div.container';
-  const { positioned, failures } = p.labels && p.labels.length > 0
-    ? await resolveLabels(page, p.labels, containerSel)
-    : { positioned: [], failures: [] };
+  let positioned = [];
+  let failures = [];
+  if (p.labels && p.labels.length > 0) {
+    try {
+      const r = await resolveLabels(page, p.labels, containerSel);
+      positioned = r.positioned;
+      failures = r.failures;
+    } catch (err) {
+      console.log(`  [WARN] label resolution failed: ${err.message.split('\n')[0]}`);
+      failures = [{ reason: `label_error: ${err.message}` }];
+    }
+  }
 
   if (opts.validate) {
-    // Dry-run: don't save screenshots, just report
     return { failures, skipped: true };
   }
 
@@ -216,26 +292,18 @@ async function processPage(page, p, config, opts) {
   const rawPath = path.join(config.rawDirAbs, `${p.name}.png`);
 
   if (positioned.length > 0) {
-    await injectLabels(page, positioned);
+    try { await injectLabels(page, positioned); } catch (e) {}
     await page.waitForTimeout(300);
   }
-  if ((await container.count()) > 0) {
-    await container.screenshot({ path: labeledPath });
-  } else {
-    await page.screenshot({ path: labeledPath, fullPage: true });
-  }
+  await safeContainerScreenshot(page, container, labeledPath);
   console.log(`  → ${labeledPath}`);
 
   // Save raw
   if (!opts.skipRaw) {
     if (positioned.length > 0) {
-      await removeLabels(page);
+      try { await removeLabels(page); } catch (e) {}
     }
-    if ((await container.count()) > 0) {
-      await container.screenshot({ path: rawPath });
-    } else {
-      await page.screenshot({ path: rawPath, fullPage: true });
-    }
+    await safeContainerScreenshot(page, container, rawPath);
     console.log(`  → ${rawPath}`);
   }
 
@@ -259,7 +327,8 @@ async function main() {
   const config = require(absConfig);
 
   // Assign 1-based order to each page (for filename prefix)
-  config.pages.forEach((p, i) => { p._order = i + 1; });
+  // If page has explicit `order` field, use it. Otherwise auto-number.
+  config.pages.forEach((p, i) => { p._order = p.order || (i + 1); });
 
   // Filter by --only
   let pagesToProcess = config.pages;
